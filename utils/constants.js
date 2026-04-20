@@ -72,10 +72,14 @@ const CHATGPT_SELECTORS = {
     'button[aria-label="Send prompt"]',
     'button[aria-label*="Send"]',
   ],
-  /** Copy button (primary completion heuristic) */
+  /** Copy button (primary completion heuristic).
+   *  Must be turn-level only — code blocks inside a streaming response
+   *  also render copy buttons, and matching those would fire the
+   *  completion observer prematurely (truncating the captured text). */
   copyButton: [
-    'button[data-testid*="copy"]',
-    'button[aria-label*="Copy"]',
+    'button[data-testid="copy-turn-action-button"]',
+    'button[data-testid*="copy-turn"]',
+    '[data-message-author-role="assistant"] button[aria-label*="Copy response"]',
   ],
   /** Stop generating button (secondary heuristic) */
   stopButton: [

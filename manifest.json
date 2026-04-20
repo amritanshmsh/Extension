@@ -23,12 +23,12 @@
   "content_scripts": [
     {
       "matches": ["*://*.qwen.ai/*"],
-      "js": ["utils/constants.js", "utils/selectors.js", "utils/messaging.js", "content_scripts/qwen.js"],
+      "js": ["utils/constants.js", "utils/selectors.js", "content_scripts/qwen.js"],
       "run_at": "document_idle"
     },
     {
       "matches": ["*://*.chatgpt.com/*"],
-      "js": ["utils/constants.js", "utils/selectors.js", "utils/messaging.js", "content_scripts/chatgpt.js"],
+      "js": ["utils/constants.js", "utils/selectors.js", "content_scripts/chatgpt.js"],
       "run_at": "document_idle"
     }
   ],

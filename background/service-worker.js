@@ -5,21 +5,37 @@
  * Routes messages between content scripts and proxies HTTP to the local backend.
  */
 
-// ─── State (transient — lost on service worker restart) ─────────
+// ─── State (in-memory cache; storage is the source of truth) ────
+// MV3 service workers are ephemeral — they unload after ~30s idle and
+// respawn on the next event. Any plain module-level state is lost on
+// each respawn. `activeSessionId` is therefore treated as a cache and
+// re-read from chrome.storage.local via getActiveSessionId() whenever
+// a handler needs it. lastSyncTimestamp / pendingErrors reset on wake,
+// which is fine — they're UI-only transient data.
 let activeSessionId = null;
 let lastSyncTimestamp = null;
 let pendingErrors = [];
 
+/**
+ * Return the active session ID, hydrating from chrome.storage.local
+ * on the first call after a service-worker wake.
+ */
+async function getActiveSessionId() {
+  if (activeSessionId) return activeSessionId;
+  const { sessionId } = await chrome.storage.local.get("sessionId");
+  if (sessionId) {
+    activeSessionId = sessionId;
+    console.log(`[Bridge SW] Hydrated session from storage: ${activeSessionId}`);
+    return activeSessionId;
+  }
+  return null;
+}
+
 // ─── Initialization ─────────────────────────────────────────────
 chrome.runtime.onInstalled.addListener(async (details) => {
   console.log(`[Bridge SW] Installed (reason: ${details.reason})`);
-
-  // Restore session from storage
-  const stored = await chrome.storage.local.get(["sessionId", "authToken"]);
-  if (stored.sessionId) {
-    activeSessionId = stored.sessionId;
-    console.log(`[Bridge SW] Restored session: ${activeSessionId}`);
-  }
+  // Warm the cache on install; storage remains source of truth.
+  await getActiveSessionId();
 });
 
 // ─── Message Router ─────────────────────────────────────────────
@@ -43,13 +59,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 async function handleMessage(message, sender) {
   switch (message.action) {
 
-    // ── Qwen extracted text → route to ChatGPT ──────────────────
+    // ── Qwen extracted text → archive prompt, then route to ChatGPT ─
     case "SEND_TO_CHATGPT": {
+      // Step 1: Fail fast if no ChatGPT tab (avoid orphan prompt rows)
       const tab = await findChatGPTTab();
       if (!tab) {
         throw new Error("No ChatGPT tab found. Please open chatgpt.com first.");
       }
 
+      // Step 2: Archive the Qwen prompt before dispatching.
+      // If archival fails after retries, do NOT dispatch — this preserves the
+      // invariant that every chatgpt response row has a paired qwen prompt row.
+      const archiveResult = await archiveToBackend({
+        text: message.text,
+        metadata: {
+          source: "qwen",
+          model: message.metadata?.model || null,
+        },
+      });
+      lastSyncTimestamp = Date.now();
+      updateBadge("✓", "#22c55e");
+      console.log(
+        `[Bridge SW] Qwen prompt archived (message_id=${archiveResult.message?.message_id})`
+      );
+
+      // Step 3: Dispatch to ChatGPT tab for injection.
       return new Promise((resolve, reject) => {
         chrome.tabs.sendMessage(
           tab.id,
@@ -59,7 +93,12 @@ async function handleMessage(message, sender) {
               reject(new Error(chrome.runtime.lastError.message));
               return;
             }
-            resolve({ success: true, tabId: tab.id, ...response });
+            resolve({
+              success: true,
+              tabId: tab.id,
+              qwenMessageId: archiveResult.message?.message_id,
+              ...response,
+            });
           }
         );
       });
@@ -77,7 +116,7 @@ async function handleMessage(message, sender) {
     case "GET_STATUS": {
       return {
         success: true,
-        sessionId: activeSessionId,
+        sessionId: await getActiveSessionId(),
         lastSync: lastSyncTimestamp,
         errors: pendingErrors.slice(-5), // Last 5 errors
         version: "1.0.0",
@@ -188,15 +227,17 @@ async function archiveToBackend(message, retryCount = 0) {
     throw new Error("Auth token not configured. Set it in the extension popup.");
   }
 
-  // Ensure we have an active session
-  if (!activeSessionId) {
+  // Ensure we have an active session (hydrates from storage first)
+  let sessionId = await getActiveSessionId();
+  if (!sessionId) {
     const session = await createSession("Auto-created session");
-    activeSessionId = session.session_id;
-    await chrome.storage.local.set({ sessionId: activeSessionId });
+    sessionId = session.session_id;
+    activeSessionId = sessionId;
+    await chrome.storage.local.set({ sessionId });
   }
 
   const payload = {
-    session_id: activeSessionId,
+    session_id: sessionId,
     role: message.metadata?.source || "chatgpt",
     content: message.text,
     metadata: {

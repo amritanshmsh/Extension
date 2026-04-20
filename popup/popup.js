@@ -69,15 +69,35 @@ async function refreshStatus() {
 }
 
 // ─── Server Connection Check ────────────────────────────────────
+// Tiered probe:
+//   1. /health (unauthenticated) — is the Express server reachable at all?
+//   2. /api/sessions (authed) — is the token valid and is the DB reachable?
+// This separates "server down" from "DB down" from "wrong token" in the
+// status dot tooltip, instead of collapsing all three into a red dot.
 async function checkServerConnection() {
+  // Step 1: reachability
   try {
-    const { authToken } = await chrome.storage.local.get("authToken");
-    if (!authToken) {
+    const healthResp = await fetch("http://localhost:3000/health");
+    if (!healthResp.ok) {
       statusDot.classList.remove("connected");
-      statusDot.title = "No auth token configured";
+      statusDot.title = `Server unhealthy: ${healthResp.status}`;
       return;
     }
+  } catch {
+    statusDot.classList.remove("connected");
+    statusDot.title = "Server unreachable (is it running on :3000?)";
+    return;
+  }
 
+  // Step 2: token + DB validation
+  const { authToken } = await chrome.storage.local.get("authToken");
+  if (!authToken) {
+    statusDot.classList.remove("connected");
+    statusDot.title = "Server reachable — no auth token configured";
+    return;
+  }
+
+  try {
     const response = await fetch("http://localhost:3000/api/sessions", {
       method: "GET",
       headers: { Authorization: `Bearer ${authToken}` },
@@ -86,13 +106,16 @@ async function checkServerConnection() {
     if (response.ok) {
       statusDot.classList.add("connected");
       statusDot.title = "Connected to server";
+    } else if (response.status === 401) {
+      statusDot.classList.remove("connected");
+      statusDot.title = "Server reachable — invalid auth token";
     } else {
       statusDot.classList.remove("connected");
-      statusDot.title = `Server error: ${response.status}`;
+      statusDot.title = `Server reachable — API error: ${response.status} (DB down?)`;
     }
   } catch (err) {
     statusDot.classList.remove("connected");
-    statusDot.title = "Server unreachable";
+    statusDot.title = `Server reachable — API call failed: ${err.message}`;
   }
 }
 
